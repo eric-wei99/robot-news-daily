@@ -1,0 +1,26 @@
+name: 人形机器人每日资讯
+
+on:
+  schedule:
+    # 每天北京时间 8:20 (UTC 0:20)
+    - cron: '20 0 * * *'
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  daily-news:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4
+
+      - name: Search and send news
+        env:
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+        run: python3 send_news.py
