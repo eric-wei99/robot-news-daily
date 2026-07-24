@@ -30,8 +30,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TODAY=$(date -u +%Y-%m-%d)
-          RUNS=$(gh run list --repo ${{ github.repository }} --event schedule --json createdAt,conclusion --limit 10 2>/dev/null)
-          if echo "$RUNS" | grep -q "$TODAY.*success"; then
+          # 用 jq 精确过滤：排除当前 run，只查今天已成功的 schedule 运行
+          SENT=$(gh run list --repo ${{ github.repository }} --event schedule --json createdAt,conclusion,databaseId --limit 20 --jq "[.[] | select(.databaseId != ${{ github.run_id }} and (.createdAt | startswith(\"$TODAY\")) and .conclusion == \"success\")] | length" 2>/dev/null || echo "0")
+          echo "Prior successful runs today: $SENT"
+          if [ "$SENT" != "0" ] && [ -n "$SENT" ]; then
             echo "already_sent=true" >> $GITHUB_OUTPUT
           else
             echo "already_sent=false" >> $GITHUB_OUTPUT
