@@ -85,7 +85,7 @@ def save_sent_cache(cache):
 
 def compute_hash(title):
     """计算文章标题的 MD5 哈希（去标点、取前40字符）"""
-    key = re.sub(r"[【】\[\]「」""'' \-—|｜]", "", title)[:40]
+    key = re.sub(r"[【】\[\]「」""'' -—|｜]", "", title)[:40]
     return hashlib.md5(key.encode()).hexdigest()
 
 
