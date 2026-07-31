@@ -13,6 +13,9 @@ concurrency:
   group: daily-news
   cancel-in-progress: false
 
+permissions:
+  contents: write
+
 jobs:
   daily-news:
     runs-on: ubuntu-latest
