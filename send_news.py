@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""人形机器人每日资讯 — GitHub Actions 版 V2.1（超链接+来源标注）
+"""人形机器人每日资讯 — GitHub Actions 版 V2.2（跨天去重）
 多渠道搜索：搜狗新闻 + 搜狗微信 + Bing国际 + 百度资讯 + Google新闻 + RSS科技站
 所有标题均带可点击超链接，每条标注来源渠道。
+V2.2: 跨天去重 — 已发送过的资讯7天内不再重复推送。
 """
 
 import os
 import sys
 import re
+import json
 import smtplib
 import hashlib
 from email.mime.text import MIMEText
@@ -24,25 +26,68 @@ RECIPIENT = "summer_sun@atop-ks.com"
 SMTP_SERVER = "smtp.feishu.cn"
 SMTP_PORT = 465
 
+# 跨天去重缓存
+SENT_CACHE_FILE = "sent_articles.json"   # 已发送文章哈希缓存（存在仓库根目录）
+CACHE_MAX_DAYS = 7                        # 7天内的已发文章不再重复推送
+
 if not PASSWORD:
     print("❌ 未设置 SMTP_PASSWORD 环境变量")
     sys.exit(1)
 
 cst = timezone(timedelta(hours=8))
 today = datetime.now(cst).strftime("%Y年%m月%d日")
+today_iso = datetime.now(cst).strftime("%Y-%m-%d")
 
 
-def make_session():
-    s = requests.Session()
-    s.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/130.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-    })
-    return s
+# ============ 跨天去重缓存 ============
+def load_sent_cache():
+    """加载已发送文章缓存，自动清理超过 CACHE_MAX_DAYS 的旧记录。
+    返回 {hash: date_str} 字典。"""
+    if not os.path.exists(SENT_CACHE_FILE):
+        return {}
+    try:
+        with open(SENT_CACHE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        hashes = data.get("hashes", {})
+        # 清理过期记录
+        cutoff = (datetime.now(cst) - timedelta(days=CACHE_MAX_DAYS)).strftime("%Y-%m-%d")
+        fresh = {h: d for h, d in hashes.items() if d >= cutoff}
+        if len(fresh) < len(hashes):
+            print(f"🧹 清理过期缓存: {len(hashes) - len(fresh)} 条（>{CACHE_MAX_DAYS}天）")
+        return fresh
+    except Exception as e:
+        print(f"⚠ 加载缓存失败: {e}，视为空缓存")
+        return {}
+
+
+def save_sent_cache(cache):
+    """保存已发送文章缓存到 JSON 文件。"""
+    try:
+        with open(SENT_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"hashes": cache}, f, ensure_ascii=False, indent=2)
+        print(f"💾 缓存已更新: {len(cache)} 条已发送记录")
+    except Exception as e:
+        print(f"⚠ 保存缓存失败: {e}")
+
+
+def compute_hash(title):
+    """计算文章标题的 MD5 哈希（去标点、取前40字符）"""
+    key = re.sub(r"[【】\[\]「」""''\s\-—|｜]", "", title)[:40]
+    return hashlib.md5(key.encode()).hexdigest()
+
+
+def update_sent_cache(news_items):
+    """将新发送的文章哈希写入缓存，返回更新后的缓存。"""
+    cache = load_sent_cache()
+    added = 0
+    for title, url, source in news_items:
+        h = compute_hash(title)
+        if h not in cache:
+            cache[h] = today_iso
+            added += 1
+    print(f"📝 新增 {added} 条到缓存（总计 {len(cache)} 条）")
+    save_sent_cache(cache)
+    return cache
 
 
 # ============ 渠道 1: 搜狗新闻 ============
@@ -80,7 +125,6 @@ def search_sogou_weixin(session):
             url = f"https://weixin.sogou.com/weixin?type=2&query={quote(q)}"
             resp = session.get(url, timeout=20)
             soup = BeautifulSoup(resp.text, "html.parser")
-            # 主要选择器
             for el in soup.select("h3 a, .txt-box h3 a, .news-list2 li h3 a"):
                 text = el.get_text(strip=True)
                 href = el.get("href", "")
@@ -88,7 +132,6 @@ def search_sogou_weixin(session):
                     if href.startswith("/"):
                         href = "https://weixin.sogou.com" + href
                     results.append((text, href, "微信公众号"))
-            # 备用：直接找 mp.weixin.qq.com 链接
             for el in soup.select("a[href*='mp.weixin.qq.com']"):
                 text = el.get_text(strip=True)
                 href = el.get("href", "")
@@ -117,7 +160,6 @@ def search_bing(session):
                 resp = session.get(bing_url, timeout=20)
                 soup = BeautifulSoup(resp.text, "html.parser")
                 found = 0
-                # Bing 新闻卡片
                 for el in soup.select(".news-card-body h2 a, .news-card .title a, a[target='_blank'] h2"):
                     text = el.get_text(strip=True)
                     if el.name == "a":
@@ -128,7 +170,6 @@ def search_bing(session):
                     if text and len(text) > 8 and not text.startswith("https://"):
                         results.append((text, href, "Bing"))
                         found += 1
-                # Bing 普通搜索结果
                 for el in soup.select("li.b_algo h2 a, h2 a[href]"):
                     text = el.get_text(strip=True)
                     href = el.get("href", "") if el.name == "a" else ""
@@ -220,18 +261,26 @@ def search_rss():
     return results
 
 
-# ============ 去重 ============
-def deduplicate(items):
-    """按标题去重，返回 (title, url, source)"""
+# ============ 去重（含跨天去重） ============
+def deduplicate(items, sent_cache=None):
+    """按标题去重：本次内去重 + 跨天去重（过滤已发送过的）。
+    返回 (title, url, source) 列表，以及被跨天过滤的数量。"""
+    if sent_cache is None:
+        sent_cache = {}
     seen = set()
     clean = []
+    skipped_cross_day = 0
     for title, url, source in items:
-        key = re.sub(r"[【】\[\]「」""''\s\-—|｜]", "", title)[:40]
-        h = hashlib.md5(key.encode()).hexdigest()
+        h = compute_hash(title)
+        # 跨天去重：已在缓存中的跳过
+        if h in sent_cache:
+            skipped_cross_day += 1
+            continue
+        # 本次内去重
         if h not in seen:
             seen.add(h)
             clean.append((title, url, source))
-    return clean
+    return clean, skipped_cross_day
 
 
 # ============ 主流程 ============
@@ -260,10 +309,7 @@ def search_all():
 
     print(f"\n{'='*50}")
     print(f"📊 原始共 {len(all_items)} 条")
-    cleaned = deduplicate(all_items)
-    print(f"   去重后共 {len(cleaned)} 条")
-
-    return cleaned
+    return all_items
 
 
 def compose_email(news_items):
@@ -292,12 +338,10 @@ def compose_email(news_items):
                 categories[cat].append((title, url, source))
                 assigned.add(idx)
 
-    # 未分类的放入行业动态
     for idx, (title, url, source) in enumerate(news_items):
         if idx not in assigned:
             categories["📊 行业动态"].append((title, url, source))
 
-    # 来源统计
     sources = {}
     for _, _, src in news_items:
         sources[src] = sources.get(src, 0) + 1
@@ -327,7 +371,6 @@ def compose_email(news_items):
         for title, url, source in items:
             em = emoji_map.get(source, "📌")
             if url:
-                # 标题做成可点击超链接
                 html += (
                     f'<li style="margin: 8px 0; line-height: 1.5;">'
                     f'<a href="{url}" target="_blank" style="color: #1a0dab; text-decoration: none;">{title}</a>'
@@ -335,7 +378,6 @@ def compose_email(news_items):
                     f'</li>'
                 )
             else:
-                # 无链接时降级为纯文本
                 html += (
                     f'<li style="margin: 8px 0; line-height: 1.5;">{title}'
                     f' <span style="color:#999;font-size:11px">[{em} {source}]</span>'
@@ -381,18 +423,36 @@ def send_email(html_content):
 
 
 def main():
-    print("🚀 人形机器人每日资讯 V2.1（超链接+来源标注版）\n")
-    news = search_all()
+    print("🚀 人形机器人每日资讯 V2.2（跨天去重版）\n")
+
+    # 1. 加载跨天去重缓存
+    sent_cache = load_sent_cache()
+    print(f"📋 已发送缓存: {len(sent_cache)} 条记录（{CACHE_MAX_DAYS}天内）")
+
+    # 2. 搜索
+    all_items = search_all()
+
+    # 3. 去重（本次 + 跨天）
+    news, skipped = deduplicate(all_items, sent_cache)
+    print(f"   本次去重后: {len(news)} 条")
+    if skipped > 0:
+        print(f"   跨天过滤: {skipped} 条（已发送过）")
 
     if not news:
-        print("⚠ 未搜到任何资讯，跳过发送")
+        print("⚠ 没有新资讯（全部已发送过），跳过发送")
         return
 
+    # 4. 整理日报
     print("\n📧 整理日报...")
     html = compose_email(news)
 
+    # 5. 发送
     print("📤 发送邮件...")
     send_email(html)
+
+    # 6. 更新跨天缓存
+    print("\n📝 更新发送缓存...")
+    update_sent_cache(news)
 
 
 if __name__ == "__main__":
