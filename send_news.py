@@ -39,6 +39,19 @@ today = datetime.now(cst).strftime("%Y年%m月%d日")
 today_iso = datetime.now(cst).strftime("%Y-%m-%d")
 
 
+def make_session():
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/130.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    })
+    return s
+
+
 # ============ 跨天去重缓存 ============
 def load_sent_cache():
     """加载已发送文章缓存，自动清理超过 CACHE_MAX_DAYS 的旧记录。
@@ -72,7 +85,7 @@ def save_sent_cache(cache):
 
 def compute_hash(title):
     """计算文章标题的 MD5 哈希（去标点、取前40字符）"""
-    key = re.sub(r"[【】\[\]「」""''\s\-—|｜]", "", title)[:40]
+    key = re.sub(r"[【】\[\]「」""'' \-—|｜]", "", title)[:40]
     return hashlib.md5(key.encode()).hexdigest()
 
 
